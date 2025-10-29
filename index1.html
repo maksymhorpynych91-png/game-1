@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ship VS Asteroids</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap');
+        
+        body {
+            background-color: #0b0f19; /* dark cosmic backround */
+            color: #e0e7ff;
+            font-family: 'Orbitron', sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .game-container {
+            width: 100%;
+            max-width: 600px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            background: #080c16; /* lighter container */
+            padding: 24px;
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0, 255, 255, 0.2);
+            border: 2px solid #06b6d4;
+        }
+
+        canvas {
+            background-color: #000000;
+            border: 4px solid #142a57;
+            border-radius: 8px;
+            box-shadow: inset 0 0 10px #222224;
+            width: 100%;
+            touch-action: none; /* Забороняємо стандартну поведінку дотику */
+        }
+
+        button {
+            height: 50px;
+            width: 100px;;
+            transition: all 0.2s ease-in-out;
+            cursor: pointer;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        .btn-primary {
+            background-color: #1a657c;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background-color: #107999;
+            box-shadow: 0 4px 15px rgba(59, 130, 246, 0.5);
+        }
+
+        .btn-secondary {
+            background-color: #1f2937;
+            color: #9ca3af;
+            border: 1px solid #374151;
+        }
+        .btn-secondary:hover {
+            background-color: #4c8492;
+            color: white;
+        }
+        
+    </style>
+</head>
+<body>
+
+    <div class="game-container">
+        <h1 class="text-3xl font-bold text-center text-cyan-400">Ship VS Asteroids</h1>0
+
+        <!-- Canvas for the game -->
+        <canvas id="gameCanvas" width="500" height="600"></canvas>
+
+        <!-- Game Controls and Status -->
+        <div class="flex justify-between items-center text-xl">
+            <span>Score: <span id="scoreDisplay">0</span></span>
+            <span>Record: <span id="highScoreDisplay">0</span></span>
+        </div>
+
+        <div id="messageBox" class="text-center text-blue-300 font-bold hidden">
+            
+    
+        </div>
+
+        <div class="flex gap-4 justify-center">
+            <button id="startButton" class="btn-primary">start</button>
+            <button id="resetButton" class="btn-secondary">Reset record</button>
+        </div>
+        
+    </div>
+
+    <!-- Firebase Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // IMPORTANT: Global variables provided by the environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // --- Firebase Initialization and Auth ---
+        let app;
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
+
+        setLogLevel('debug'); // For logging Firestore operations
+
+        if (Object.keys(firebaseConfig).length > 0) {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                } else {
+                    // Sign in anonymously if no token is available or previous sign-in failed
+                    if (!initialAuthToken) {
+                        try {
+                            await signInAnonymously(auth);
+                        } catch (error) {
+                            console.error("failed to anonymusly sign:", error);
+                        }
+                    }
+                }
+                document.getElementById('userIdDisplay').textContent = userId || 'N/A';
+                isAuthReady = true;
+                // Once authenticated, load the user data (high score)
+                if (userId) {
+                    loadUserData();
+                }
+            });
+
+            if (initialAuthToken) {
+                signInWithCustomToken(auth, initialAuthToken).catch(error => {
+                    console.error("Помилка входу з токеном:", error);
+                });
+            }
+        } else {
+            console.warn("Firebase Config not found. data wont be saved");
+            isAuthReady = true; // Mark ready even without Firebase for game to start
+        }
+
+        // --- Game Setup ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Adjust canvas size for responsiveness
+        function resizeCanvas() {
+            const containerWidth = canvas.parentElement.clientWidth;
+            // Maintain a 5:6 aspect ratio
+            const newWidth = Math.min(containerWidth, 600);
+            const newHeight = newWidth * (600 / 500);
+            canvas.width = newWidth;
+            canvas.height = newHeight;
+        }
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+
+        // Game State
+        let gameState = {
+            running: false,
+            score: 0,
+            highScore: 0,
+            player: {
+                x: canvas.width / 2,
+                y: canvas.height - 60,
+                width: 50,
+                height: 100,
+                speed: 8
+            },
+            asteroids: [],
+            spawnInterval: 100, // Asteroids will spawn faster over time
+            lastSpawnTime: 0,
+            gameFrame: 0,
+            // ВИДАЛЕНО: customImages
+            defaultImages: {
+                spaceship: new Image(),
+                asteroid: new Image()
+            }
+        };
+
+        // Set default images (simple SVGs as Data URLs are instantly available)
+        gameState.defaultImages.spaceship.src ='A7D0DB64-C333-4CA4-B58B-BBEFCC51BE55.webp';
+        gameState.defaultImages.asteroid.src = '6AE59FB9-482D-422C-A51F-02AD78123B28.webp';
+
+
+        // --- Firebase Data Operations ---
+
+        const getDocRef = () => {
+            if (!userId || !db) return null;
+            return doc(db, 'artifacts', appId, 'users', userId, 'gameData', 'spaceshipDodger');
+        };
+
+        async function loadUserData() {
+            if (!isAuthReady || !userId) return;
+
+            const docRef = getDocRef();
+            if (!docRef) return;
+
+            try {
+                const docSnap = await getDoc(docRef);
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    gameState.highScore = data.highScore || 0;
+                    // ВИДАЛЕНО: логіка завантаження зображень
+                }
+
+                document.getElementById('highScoreDisplay').textContent = gameState.highScore;
+            } catch (error) {
+                console.error("Помилка завантаження даних користувача:", error);
+            }
+        }
+
+        async function saveHighScore() {
+            if (!isAuthReady || !userId) return;
+
+            const docRef = getDocRef();
+            if (!docRef) return;
+
+            try {
+                await setDoc(docRef, {
+                    highScore: gameState.highScore
+                    // ВИДАЛЕНО: збереження зображень
+                }, { merge: true });
+                console.log("record saved!");
+            } catch (error) {
+                console.error("couldnt saving scrore:", error);
+            }
+        }
+
+        function resetHighScore() {
+            gameState.highScore = 0;
+            document.getElementById('highScoreDisplay').textContent = 0;
+            saveHighScore(); // Save 0 to Firestore
+        }
+
+        // ВИДАЛЕНО: логіка завантаження зображень (loadImage, handleImageUpload)
+
+        // --- Game Logic ---
+
+        function resetGame() {
+            gameState.score = 0;
+            gameState.player.x = canvas.width / 2 - gameState.player.width / 2;
+            gameState.player.y = canvas.height - gameState.player.height * 1.5;
+            gameState.asteroids = [];
+            gameState.spawnInterval = 100;
+            gameState.lastSpawnTime = 0;
+            gameState.gameFrame = 0;
+            document.getElementById('scoreDisplay').textContent = 0;
+            document.getElementById('startButton').textContent = 'start';
+            document.getElementById('messageBox').classList.add('hidden');
+        }
+
+        function startGame() {
+            if (!gameState.running) {
+                resetGame();
+                gameState.running = true;
+                document.getElementById('startButton').textContent = 'Game running...';
+                document.getElementById('startButton').disabled = true;
+                gameLoop();
+            }
+        }
+
+        function endGame() {
+            gameState.running = false;
+            document.getElementById('startButton').textContent = 'Try Again';
+            document.getElementById('startButton').disabled = false;
+            document.getElementById('messageBox').textContent = `Game Over! Your score: ${gameState.score}.`;
+            document.getElementById('messageBox').classList.remove('hidden');
+
+            if (gameState.score > gameState.highScore) {
+                gameState.highScore = gameState.score;
+                document.getElementById('highScoreDisplay').textContent = gameState.highScore;
+                saveHighScore();
+            }
+        }
+
+        // --- Drawing Functions ---
+
+        function drawPlayer() {
+            // Тепер використовується лише вбудоване зображення
+            const img = gameState.defaultImages.spaceship;
+            
+            // ПЕРЕВІРКА: Переконайтеся, що зображення завантажено, перш ніж малювати його
+            if (!img.complete) return; 
+
+            // Adjust player position to be centered based on its new dimensions
+            gameState.player.x = Math.max(0, Math.min(canvas.width - gameState.player.width, gameState.player.x));
+            
+            ctx.drawImage(
+                img, 
+                gameState.player.x, 
+                gameState.player.y, 
+                gameState.player.width, 
+                gameState.player.height
+            );
+        }
+
+        function drawAsteroids() {
+            // Тепер використовується лише вбудоване зображення
+            const img = gameState.defaultImages.asteroid;
+            
+            // ПЕРЕВІРКА: Переконайтеся, що зображення завантажено, перш ніж малювати його
+            if (!img.complete) return;
+
+            gameState.asteroids.forEach(a => {
+                ctx.save();
+                ctx.translate(a.x + a.size / 2, a.y + a.size / 2); // Move to the center of the asteroid
+                ctx.rotate(a.rotation); // Rotate the canvas
+                
+                ctx.drawImage(
+                    img, 
+                    -a.size / 2, 
+                    -a.size / 2, 
+                    a.size, 
+                    a.size
+                );
+
+                ctx.restore();
+            });
+        }
+        
+        // --- Movement and Spawning ---
+
+        // Controls
+        let keys = {};
+        document.addEventListener('keydown', (e) => { keys[e.key] = true; });
+        document.addEventListener('keyup', (e) => { keys[e.key] = false; });
+
+        // Touch control
+        canvas.addEventListener('touchstart', handleTouchStart, false);
+        canvas.addEventListener('touchmove', handleTouchMove, false);
+
+        let lastTouchX = null;
+        function handleTouchStart(e) {
+            e.preventDefault();
+            lastTouchX = e.touches[0].clientX;
+        }
+
+        function handleTouchMove(e) {
+            e.preventDefault();
+            if (!lastTouchX) return;
+            const currentTouchX = e.touches[0].clientX;
+            
+            // Calculate movement delta relative to the canvas width
+            const deltaX = currentTouchX - lastTouchX;
+            const speedFactor = 0.5; // Sensitivity factor
+            
+            if (gameState.running) {
+                gameState.player.x += deltaX * speedFactor;
+                // Clamp player position
+                gameState.player.x = Math.max(0, Math.min(canvas.width - gameState.player.width, gameState.player.x));
+            }
+
+            lastTouchX = currentTouchX;
+        }
+
+        function updatePlayer() {
+            if (keys['ArrowLeft'] || keys['a']) {
+                gameState.player.x -= gameState.player.speed;
+            }
+            if (keys['ArrowRight'] || keys['d']) {
+                gameState.player.x += gameState.player.speed;
+            }
+
+            // Keep player within bounds
+            gameState.player.x = Math.max(0, Math.min(canvas.width - gameState.player.width, gameState.player.x));
+        }
+
+        function updateAsteroids() {
+            for (let i = gameState.asteroids.length - 1; i >= 0; i--) {
+                const a = gameState.asteroids[i];
+                a.y += a.speed;
+                a.rotation += a.rotationSpeed;
+
+                // Remove asteroid if it's off screen
+                if (a.y > canvas.height) {
+                    gameState.asteroids.splice(i, 1);
+                    gameState.score++;
+                    document.getElementById('scoreDisplay').textContent = gameState.score;
+                }
+            }
+        }
+        
+        function spawnAsteroid() {
+            const size = 30 + Math.random() * 30; // 30 to 60
+            const speed = 2 + Math.random() * (1 + gameState.gameFrame / 5000); // Speed up over time
+            const rotationSpeed = (Math.random() - 0.5) * 0.05;
+
+            const asteroid = {
+                x: Math.random() * (canvas.width - size),
+                y: -size, // Start off-screen at the top
+                size: size,
+                speed: speed,
+                rotation: 0,
+                rotationSpeed: rotationSpeed
+            };
+            gameState.asteroids.push(asteroid);
+            
+            // Decrease spawn interval over time (min 20 frames)
+            gameState.spawnInterval = Math.max(20, 100 - gameState.gameFrame / 100); 
+        }
+
+        // --- Collision Detection ---
+
+        function checkCollisions() {
+            const p = gameState.player;
+            for (const a of gameState.asteroids) {
+                // Simple AABB (Axis-Aligned Bounding Box) collision
+                if (p.x < a.x + a.size &&
+                    p.x + p.width > a.x &&
+                    p.y < a.y + a.size &&
+                    p.y + p.height > a.y) {
+                    endGame();
+                    return true;
+                }
+            }
+            return false;
+        }
+        
+        // --- Main Game Loop ---
+        let lastTime = 0;
+        
+        function gameLoop(timestamp = 0) {
+            if (!gameState.running) return;
+
+            const deltaTime = timestamp - lastTime;
+            lastTime = timestamp;
+
+            // 1. Clear Canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 2. Update Game State
+            updatePlayer();
+            updateAsteroids();
+            gameState.gameFrame++;
+            
+            if (gameState.gameFrame - gameState.lastSpawnTime > gameState.spawnInterval) {
+                spawnAsteroid();
+                gameState.lastSpawnTime = gameState.gameFrame;
+            }
+
+            // 3. Check Collisions
+            if (checkCollisions()) return;
+
+            // 4. Draw
+            drawPlayer();
+            drawAsteroids();
+
+            // 5. Loop
+            requestAnimationFrame(gameLoop);
+        }
+
+        // --- Event Listeners and Initial Setup ---
+        
+        document.getElementById('startButton').addEventListener('click', startGame);
+        document.getElementById('resetButton').addEventListener('click', resetHighScore);
+
+        // Initial setup message
+        document.getElementById('messageBox').textContent = 'Press ´start´ button to start the game!';
+        document.getElementById('messageBox').classList.remove('hidden');
+
+        // Initial call to start the game loop only after window load/auth
+        window.onload = function() {
+            // Ensure canvas is resized initially
+            resizeCanvas();
+            
+            if (!userId) {
+                // If auth is not ready yet, game will wait for onAuthStateChanged
+            } else {
+                loadUserData();
+            }
+        };
+
+    </script>
+
+</body>
+</html>
